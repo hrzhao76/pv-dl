@@ -1,9 +1,9 @@
 [project]
-name = "sampleproject"  # Required
+name = "pv-dl"  # Required
 
 version = "0.0.1"  # Required
 
-description = "A sample Python project"  # Optional
+description = "Deep Learning for Primary Vertex Reconstruction "  # Optional
 
 readme = "README.md" # Optional
 
