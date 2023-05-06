@@ -27,6 +27,7 @@ class VertexPerformance:
         file_path: Union[Path, str],
         ttree_name: str,
         eval_type: str,
+        algo: str = "IVF",
         if_save_fig: bool = False,
         output_path: Union[Path, str] = None,
         verbosity: int = 3,
@@ -47,7 +48,7 @@ class VertexPerformance:
                 f"Tree {self.ttree_name} not found in {self.input_path}.\
                 available keys are {root_file.keys()}"
             )
-
+        self.algo = algo
         self.eval_type = eval_type
         if self.eval_type == "truth":
             self.key_vtx = "truth_PriVtx"
@@ -527,7 +528,7 @@ class VertexPerformance:
 
         eff.SetLineColor(2)
         eff.Draw()
-        legend_eff.AddEntry(eff, "IVF")
+        legend_eff.AddEntry(eff, f"{self.algo}")
         legend_eff.Draw("same")
         canvas_eff.Draw()
         if self.if_save_fig:
