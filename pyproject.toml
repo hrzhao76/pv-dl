@@ -96,7 +96,7 @@ requires = ["setuptools>=43.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.black]
-line-length = 79
+line-length = 108
 include = '\.pyi?$'
 exclude = '''
 /(
