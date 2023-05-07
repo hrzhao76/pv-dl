@@ -11,6 +11,7 @@ import mplhep as hep
 import ROOT
 import logging
 from tqdm import tqdm
+import pandas as pd
 
 from utils.io import check_inputpath, check_outputpath, logging_setup
 from utils import (
@@ -21,6 +22,13 @@ from utils import (
 )
 
 
+def calculate_component(track_at_cluster):
+    avg_vtx_x0 = np.average(track_at_cluster["x0"], weights=1.0 / (track_at_cluster["err_d0"] ** 2))
+    avg_vtx_y0 = np.average(track_at_cluster["y0"], weights=1.0 / (track_at_cluster["err_d0"] ** 2))
+    avg_vtx_z0 = np.average(track_at_cluster["z0"], weights=1.0 / (track_at_cluster["err_z0"] ** 2))
+    return avg_vtx_x0, avg_vtx_y0, avg_vtx_z0
+
+
 class VertexPerformance:
     def __init__(
         self,
@@ -28,6 +36,7 @@ class VertexPerformance:
         ttree_name: str,
         eval_type: str,
         algo: str = "IVF",
+        use_fitted_vtx: bool = False,
         if_save_fig: bool = False,
         output_path: Union[Path, str] = None,
         verbosity: int = 3,
@@ -50,18 +59,59 @@ class VertexPerformance:
             )
         self.algo = algo
         self.eval_type = eval_type
+        self.use_fitted_vtx = use_fitted_vtx
+
         if self.eval_type == "truth":
             self.key_vtx = "truth_PriVtx"
         elif self.eval_type == "reco":
             self.key_vtx = "reco_PriVtx"
-        elif self.eval == "spvcnn":
+        elif self.eval_type == "spvcnn":
             self.key_vtx = "spvcnn_PriVtx"
         else:
             raise NotImplementedError(f"eval_type {self.eval_type} not found.")
 
-        self.key_vtx_vx = self.key_vtx + "X"
-        self.key_vtx_vy = self.key_vtx + "Y"
-        self.key_vtx_vz = self.key_vtx + "Z"
+        if self.use_fitted_vtx:
+            self.position_type = "fitted"
+            self.key_vtx_vx = self.key_vtx + "X"
+            self.key_vtx_vy = self.key_vtx + "Y"
+            self.key_vtx_vz = self.key_vtx + "Z"
+
+            self.reco_vtx_vx_allevenents = self.events[self.key_vtx_vx]
+            self.reco_vtx_vy_allevenents = self.events[self.key_vtx_vy]
+            self.reco_vtx_vz_allevenents = self.events[self.key_vtx_vz]
+
+        elif not self.use_fitted_vtx:
+            self.position_type = "weighted_avg"
+            # now we calculate the weighted average of the reco tracks as the reco vertex position
+            self.reco_vtx_vx_allevenents = []
+            self.reco_vtx_vy_allevenents = []
+            self.reco_vtx_vz_allevenents = []
+
+            for event_idx, event in enumerate(self.events):
+                if self.eval_type == "truth":
+                    reco_trk_reco_vtx_idx = event.reco_trk_truth_vtx_idx
+                elif self.eval_type == "reco":
+                    reco_trk_reco_vtx_idx = event.reco_trk_reco_vtx_idx
+                    if self.algo == "IVF":
+                        reco_trk_reco_vtx_idx = ak.flatten(reco_trk_reco_vtx_idx, axis=1)
+
+                elif self.eval_type == "spvcnn":
+                    reco_trk_reco_vtx_idx = event.reco_trk_spvcnn_vtx_ins_idx - 1
+                    sem_mask = event.reco_trk_spvcnn_vtx_sem_idx == 0  # sem_idx of 0 is bkg
+                    reco_trk_reco_vtx_idx[
+                        sem_mask
+                    ] = -1  # set the reco vtx idx to -1 for tracks that are preded as bkg
+                else:
+                    raise NotImplementedError(f"eval_type {self.eval_type} for fitted vtx not found.")
+                try:
+                    reco_vtx_vx, reco_vtx_vy, reco_vtx_vz = self.get_weighted_avg_vtx_position(
+                        event, reco_trk_reco_vtx_idx
+                    )
+                except ValueError:
+                    print(f"event {event_idx} ")
+                self.reco_vtx_vx_allevenents.append(reco_vtx_vx)
+                self.reco_vtx_vy_allevenents.append(reco_vtx_vy)
+                self.reco_vtx_vz_allevenents.append(reco_vtx_vz)
 
         logging_setup(verbosity=verbosity, if_write_log=False, output_path=None)
 
@@ -76,14 +126,45 @@ class VertexPerformance:
     def eval(self):
         self.eval_differenceZ()
 
-    def get_difference_Z(self):
-        vtx_vz = self.events[self.key_vtx_vz]
-        assert isinstance(vtx_vz, ak.Array)
+    def get_difference_Z_ak(self, vtx_vz_allevents):
+        assert isinstance(vtx_vz_allevents, ak.Array)
         differenceZ = []
-        for vtx_vz_event in vtx_vz:
+        for vtx_vz_event in vtx_vz_allevents:
             distance_all_pairs = ak.flatten(vtx_vz_event[:, None] - vtx_vz_event)
             differenceZ.append(distance_all_pairs[distance_all_pairs != 0])
         return differenceZ
+
+    def get_weighted_avg_vtx_position(self, event, reco_trk_reco_vtx_idx):
+        assert len(reco_trk_reco_vtx_idx) == len(event.reco_trk_z0)
+        mask = reco_trk_reco_vtx_idx >= 0
+        reco_trk_d0 = event.reco_trk_d0[mask]
+        reco_trk_z0 = event.reco_trk_z0[mask]
+        reco_trk_phi = event.reco_trk_phi[mask]
+        reco_trk_err_d0 = event.reco_trk_err_d0[mask]
+        reco_trk_err_z0 = event.reco_trk_err_z0[mask]
+        reco_trk_reco_vtx_idx = reco_trk_reco_vtx_idx[mask]
+
+        reco_trk_x0 = reco_trk_d0 * np.cos(reco_trk_phi)
+        reco_trk_y0 = reco_trk_d0 * np.sin(reco_trk_phi)
+        reco_tracks_pos = {
+            "x0": reco_trk_x0,
+            "y0": reco_trk_y0,
+            "z0": reco_trk_z0,
+            "err_z0": reco_trk_err_z0,
+            "err_d0": reco_trk_err_d0,
+            "pred_instance_labels": reco_trk_reco_vtx_idx,
+        }
+        # breakpoint()
+        try:
+            reco_tracks_pos_df = pd.DataFrame(reco_tracks_pos)
+        except ValueError:
+            breakpoint()
+        avg_vtx_3pos = (
+            reco_tracks_pos_df.groupby("pred_instance_labels").apply(calculate_component).to_list()
+        )
+        avg_vtx_3pos = np.array(avg_vtx_3pos)
+
+        return avg_vtx_3pos[:, 0], avg_vtx_3pos[:, 1], avg_vtx_3pos[:, 2]
 
     def get_classification_and_eff(
         self,
@@ -95,15 +176,20 @@ class VertexPerformance:
         truth_HS_idx=0,
     ):
         for event_idx, event in enumerate(tqdm((self.events))):
-            reco_vtx_vx = event[self.key_vtx_vx]
-            reco_vtx_vy = event[self.key_vtx_vy]
-            reco_vtx_vz = event[self.key_vtx_vz]
+            # logging.debug(f"Processing event {event_idx}...")
+            reco_vtx_vx = self.reco_vtx_vx_allevenents[event_idx]
+            reco_vtx_vy = self.reco_vtx_vy_allevenents[event_idx]
+            reco_vtx_vz = self.reco_vtx_vz_allevenents[event_idx]
 
             truth_vtx_vx = event.truth_PriVtxX
             truth_vtx_vy = event.truth_PriVtxY
             truth_vtx_vz = event.truth_PriVtxZ
 
-            RecoVertexMatchInfo = self.get_MatchInfo(event)
+            if not np.sum(event.reco_trk_truth_vtx_idx == 0):
+                logging.warning(f"Truth HS in event {event_idx} donesn't have reco tracks, skipping!")
+                continue
+
+            RecoVertexMatchInfo = self.get_MatchInfo(event, event_idx)
             vtx_types = self.classifyRecoVertex(RecoVertexMatchInfo)
             hs_type = self.classifyHardScatter_athena(RecoVertexMatchInfo, vtx_types)
 
@@ -133,6 +219,8 @@ class VertexPerformance:
                 trhth_HS_vtx_recoed = True
             if idx_best_reco_HS_nTrk == idx_best_reco_HS_sumpt2:
                 trhth_HS_vtx_seled = True
+            if self.eval_type == "truth" and not trhth_HS_vtx_seled:
+                logging.debug(f"Truth HS not selected in event {event_idx}")
 
             hs_reco_eff.Fill(trhth_HS_vtx_recoed, local_PU_density)
             hs_sel_eff.Fill(
@@ -152,14 +240,15 @@ class VertexPerformance:
             hs_reco_sel_eff,
         )
 
-    def get_MatchInfo(self, event: ak.highlevel.Record):
+    def get_MatchInfo(self, event: ak.highlevel.Record, event_idx: int):
         """Event base flattening and return the performance
 
         Args:
             event (ak.highlevel.Record): _description_
         """
-        reco_vtx_vz = event[self.key_vtx_vz]
-        truth_vtx_vz = event.truth_PriVtxZ
+
+        reco_vtx_vz = self.reco_vtx_vz_allevenents[event_idx]
+        truth_vtx_vz = event["truth_PriVtxZ"]
 
         n_reco_vtx = len(reco_vtx_vz)
         n_truth_vtx = len(truth_vtx_vz)
@@ -173,6 +262,17 @@ class VertexPerformance:
             reco_trk_reco_vtx_idx = ak.values_astype(event.reco_trk_reco_vtx_idx, "int32")
             reco_trk_reco_vtx_trackWeight = event.reco_trk_reco_vtx_trackWeight
 
+        elif self.eval_type == "spvcnn":
+            reco_trk_reco_vtx_idx = ak.values_astype(
+                event["reco_trk_spvcnn_vtx_ins_idx"] - 1, "int32"
+            )  # minus 1 because spvcnn instance label of 0 is noise
+            sem_mask = event["reco_trk_spvcnn_vtx_sem_idx"] == 0  # sem_idx of 0 is bkg
+            reco_trk_reco_vtx_idx[
+                sem_mask
+            ] = -1  # set the reco vtx idx to -1 for tracks that are preded as bkg
+
+            reco_trk_reco_vtx_trackWeight = np.ones_like(reco_trk_reco_vtx_idx)
+
         reco_trk_truth_vtx_idx = event.reco_trk_truth_vtx_idx
 
         # the first row is number of tracks
@@ -182,7 +282,16 @@ class VertexPerformance:
         if self.eval_type == "truth":
             assert np.all(reco_trk_reco_vtx_idx == reco_trk_truth_vtx_idx)
 
-            reconstructable_truth_vtx_idx = np.unique(reco_trk_truth_vtx_idx).to_list()
+            reconstructable_truth_vtx_idx = np.unique(event.reco_trk_truth_vtx_idx)
+            reconstructable_truth_vtx_idx = reconstructable_truth_vtx_idx[
+                reconstructable_truth_vtx_idx >= 0
+            ]
+            if 0 not in reconstructable_truth_vtx_idx:
+                logging.warning(
+                    "Truth vertex 0 is not in the reconstructable truth vertex list, added it manually!"
+                )
+                reconstructable_truth_vtx_idx = np.insert(reconstructable_truth_vtx_idx, 0, 0, axis=0)
+            reconstructable_truth_vtx_idx = reconstructable_truth_vtx_idx.to_list()
             n_reconstructable_truth_vtx = len(reconstructable_truth_vtx_idx)
 
             RecoVertexMatchInfo = np.zeros(
@@ -191,11 +300,15 @@ class VertexPerformance:
             )
 
             for reco_trk_idx in range(len(reco_trk_truth_vtx_idx)):
+                ### filter the reco tracks that are not or illy associated to any truth particles
+                if reco_trk_truth_vtx_idx[reco_trk_idx] < 0:
+                    continue
                 truth_vtx_idx = reco_trk_truth_vtx_idx[reco_trk_idx]
                 reco_vtx_idx = reco_trk_reco_vtx_idx[reco_trk_idx]
 
                 if truth_vtx_idx not in reconstructable_truth_vtx_idx:
                     continue
+
                 reco_vtx_idx = reconstructable_truth_vtx_idx.index(reco_vtx_idx)
                 truth_vtx_idx = reconstructable_truth_vtx_idx.index(truth_vtx_idx)
 
@@ -208,6 +321,19 @@ class VertexPerformance:
             ### TODO Add reco track matching prob check
             ### TODO Add fake reco track check
             # assert np.sum(RecoVertexMatchInfo[0, :, :]) == np.sum(ak.flatten(reco_trk_reco_vtx_idx, axis=0) >= 0)
+        if self.eval_type == "spvcnn":
+            RecoVertexMatchInfo = np.zeros((3, n_reco_vtx, n_truth_vtx), dtype=float)
+            for reco_trk_idx in range(len(reco_trk_truth_vtx_idx)):
+                truth_vtx_idx = reco_trk_truth_vtx_idx[reco_trk_idx]
+                reco_vtx_idxs = reco_trk_reco_vtx_idx[reco_trk_idx]
+                if reco_trk_truth_vtx_idx[reco_trk_idx] < 0 or reco_trk_reco_vtx_idx[reco_trk_idx] < 0:
+                    continue
+
+                RecoVertexMatchInfo[0, reco_vtx_idx, truth_vtx_idx] += 1
+                RecoVertexMatchInfo[1, reco_vtx_idx, truth_vtx_idx] += reco_trk_pt2[reco_trk_idx]
+                RecoVertexMatchInfo[2, reco_vtx_idx, truth_vtx_idx] += reco_trk_reco_vtx_trackWeight[
+                    reco_trk_idx
+                ]
 
         if self.eval_type == "reco":
             RecoVertexMatchInfo = np.zeros((3, n_reco_vtx, n_truth_vtx), dtype=float)
@@ -216,6 +342,9 @@ class VertexPerformance:
                 truth_vtx_idx = reco_trk_truth_vtx_idx[reco_trk_idx]
                 reco_vtx_idxs = reco_trk_reco_vtx_idx[reco_trk_idx]
 
+                ### filter the reco tracks that are not or illy associated to any truth particles
+                if reco_trk_truth_vtx_idx[reco_trk_idx] < 0:
+                    continue
                 for i, reco_vtx_idx in enumerate(reco_vtx_idxs):
                     if reco_vtx_idx < 0:
                         continue
@@ -381,7 +510,11 @@ class VertexPerformance:
 
     def eval_differenceZ(self, start: int = -5, stop: int = 5, bins: int = 50):
         logging.info("Evaluating difference Z...")
-        differenceZ = self.get_difference_Z()
+        if self.use_fitted_vtx:
+            differenceZ = self.get_difference_Z_ak(self.reco_vtx_vz_allevenents)
+        else:
+            differenceZ = self.get_difference_Z_ak(ak.Array(self.reco_vtx_vz_allevenents))
+
         differenceZ = np.concatenate(differenceZ)
         hist_differenceZ = hist.Hist(
             hist.axis.Regular(
@@ -392,11 +525,12 @@ class VertexPerformance:
             )
         )
         hist_differenceZ.fill(differenceZ)
+
         fig, ax = self.plot_hist(
             hist_differenceZ,
             xlabel=name_title_dicts["diffZ"],
-            title=f"diff_Z_{self.key_vtx_vz}",
-            output_name=f"diffZ_{self.key_vtx_vz}.png",
+            title=f"diff_Z_{self.eval_type}_{self.position_type}",
+            output_name=f"diffZ_{self.eval_type}_{self.position_type}.png",
         )
         logging.info("Evaluating difference Z finished.")
         ### return the figure and axis object for further modification
@@ -409,7 +543,7 @@ class VertexPerformance:
 
         hs_reco_eff = ROOT.TEfficiency(
             "hs_reco_eff",
-            "HS Reconstruction Efficiency; Local PU density; eff",
+            f"HS Reconstruction Efficiency {self.eval_type}_{self.position_type}; Local PU density; eff",
             12,
             0,
             6,
@@ -417,7 +551,7 @@ class VertexPerformance:
 
         hs_sel_eff = ROOT.TEfficiency(
             "hs_sel_eff",
-            "HS Selection Efficiency; Local PU density; eff",
+            f"HS Selection Efficiency {self.eval_type}_{self.position_type}; Local PU density; eff",
             12,
             0,
             6,
@@ -425,7 +559,7 @@ class VertexPerformance:
 
         hs_reco_sel_eff = ROOT.TEfficiency(
             "hs_reco_sel_eff",
-            "HS Reconstruction and Selection Efficiency; Local PU density; eff",
+            f"HS Reconstruction and Selection Efficiency {self.eval_type}_{self.position_type}; Local PU density; eff",
             12,
             0,
             6,
@@ -441,27 +575,27 @@ class VertexPerformance:
         self.plot_pv_hs_classification(
             total_reco_vtx_type,
             class_type="pv",
-            output_name=f"pv_classification_{self.eval_type}.png",
+            output_name=f"pv_classification_{self.eval_type}_{self.position_type}.png",
         )
         self.plot_pv_hs_classification(
             total_hs_type,
             class_type="hs",
-            output_name=f"hs_classification_{self.eval_type}.png",
+            output_name=f"hs_classification_{self.eval_type}_{self.position_type}.png",
         )
         self.plot_eff(
             hs_reco_eff,
             class_type="hs",
-            output_name=f"hs_reco_eff_{self.eval_type}",
+            output_name=f"hs_reco_eff_{self.eval_type}_{self.position_type}",
         )
         self.plot_eff(
             hs_sel_eff,
             class_type="hs",
-            output_name=f"hs_sel_eff_{self.eval_type}",
+            output_name=f"hs_sel_eff_{self.eval_type}_{self.position_type}",
         )
         self.plot_eff(
             hs_reco_sel_eff,
             class_type="hs",
-            output_name=f"hs_reco_sel_eff_{self.eval_type}",
+            output_name=f"hs_reco_sel_eff_{self.eval_type}_{self.position_type}",
         )
 
         logging.info("Evaluating classification and efficiency finished.")
@@ -515,7 +649,7 @@ class VertexPerformance:
         fig, ax = plt.subplots()
         ax.stairs(enum_classification)
         ax.set_xticks(bin_centers, x_labels)
-        ax.set_title(f"{identifier_title} classification on IVF")
+        ax.set_title(f"{identifier_title} classification on {self.eval_type}_{self.position_type}")
         ax.set_xlabel(f"{identifier_title} type")
         ax.set_ylabel("Numbers")
         if self.if_save_fig:
