@@ -553,7 +553,7 @@ class VertexPerformance:
         )
         logging.info("Evaluating difference Z finished.")
         ### return the figure and axis object for further modification
-        return fig, ax
+        return differenceZ
 
     def eval_classification_and_eff(self):
         logging.info("Evaluating classification and efficiency...")
@@ -618,13 +618,13 @@ class VertexPerformance:
         )
 
         logging.info("Evaluating classification and efficiency finished.")
-        # return (
-        #     total_reco_vtx_type,
-        #     total_hs_type,
-        #     hs_reco_eff,
-        #     hs_sel_eff,
-        #     hs_reco_sel_eff,
-        # )
+        return (
+            total_reco_vtx_type,
+            total_hs_type,
+            hs_reco_eff,
+            hs_sel_eff,
+            hs_reco_sel_eff,
+        )
 
     def plot_hist(
         self,
